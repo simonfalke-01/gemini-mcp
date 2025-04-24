@@ -1,17 +1,19 @@
 /**
- * Brainstorm Tool - Enables collaborative brainstorming between Claude and Gemini
+ * Brainstorm Tool - Enables automatic collaborative brainstorming between Claude and Gemini
  * 
- * This tool facilitates multi-round collaborative planning between Claude and Gemini.
+ * This tool facilitates multi-round collaborative planning until consensus is reached.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { generateWithGeminiPro } from "../gemini-client.js";
+import { logger } from "../utils/logger.js";
 
-interface BrainstormRound {
-  round: number;
-  claudeInput: string;
+interface Round {
+  number: number;
+  claudeThoughts: string;
   geminiResponse: string;
+  consensusScore: number;
 }
 
 /**
@@ -22,168 +24,228 @@ export function registerBrainstormTool(server: McpServer): void {
     "gemini-brainstorm",
     {
       prompt: z.string().describe("The problem statement or query to brainstorm about"),
-      round: z.number().int().min(1).default(1).describe("The current round of brainstorming"),
-      claudeInput: z.string().optional().describe("Claude's latest perspective (required for round > 1)"),
-      history: z.array(z.object({
-        round: z.number(),
-        claudeInput: z.string(),
-        geminiResponse: z.string(),
-      })).optional().describe("The history of previous brainstorming rounds")
+      maxRounds: z.number().int().min(1).max(5).default(3).describe("Maximum number of brainstorming rounds"),
+      claudeThoughts: z.string().describe("Claude's initial thoughts on the problem")
     },
-    async ({ prompt, round, claudeInput, history = [] }) => {
-      console.log(`Brainstorming round ${round} with Gemini`);
-      
+    async ({ prompt, maxRounds = 3, claudeThoughts }) => {
+      logger.info(`Starting consensus-building brainstorm with Gemini: ${prompt.substring(0, 50)}...`);
+
       try {
-        // For round 1, generate initial thoughts
-        if (round === 1) {
-          const initialPrompt = `
-You are participating in a collaborative brainstorming session with Claude, another AI assistant.
-Together, you will create a plan to address the following request:
+        // Set up conversation tracking
+        const rounds: Round[] = [];
+        let currentRound = 1;
+        let consensusReached = false;
+        
+        // First round - Gemini responds to Claude's initial thoughts
+        const firstRoundPrompt = `
+You're collaborating with Claude (another AI assistant) to address this user request:
 
 ---
 ${prompt}
 ---
 
-Please provide your initial thoughts, considering:
-1. How you would approach this problem
-2. What information or resources you might need
-3. Any challenges you anticipate
-4. The steps you would take to implement a solution
+Claude has shared these initial thoughts:
+${claudeThoughts}
 
-Remember, this is the first round of a collaborative discussion, so focus on sharing your initial perspective rather than a complete solution.
+Analyze Claude's thoughts and respond with:
+1. Points of agreement
+2. Additional insights or perspectives
+3. Any modifications to Claude's approach
+4. Next steps to implement the solution
+
+End your response with a "Consensus Score" from 1-10 indicating how aligned you are with Claude:
+- 1-3: Significant differences in approach
+- 4-6: Partial agreement with key differences
+- 7-9: Strong alignment with minor refinements
+- 10: Complete consensus
+
+Format this as: "Consensus Score: [NUMBER]"
 `;
 
-          const geminiResponse = await generateWithGeminiPro(initialPrompt);
-          
-          return {
-            content: [{ 
-              type: "text", 
-              text: geminiResponse 
-            }]
-          };
-        } 
-        // For subsequent rounds, consider Claude's input and history
-        else {
-          if (!claudeInput) {
-            return {
-              content: [{ 
-                type: "text", 
-                text: "Error: Claude's input is required for rounds after the first one" 
-              }],
-              isError: true
-            };
-          }
-
-          const historyText = history.map(entry => `
-Round ${entry.round}:
-- Claude: ${entry.claudeInput.substring(0, 500)}...
-- Gemini: ${entry.geminiResponse.substring(0, 500)}...
-`).join("\n");
-
-          const collaborationPrompt = `
-You are in round ${round} of a collaborative brainstorming session about this request:
-
----
-${prompt}
----
-
-${history.length > 0 ? `Here's a summary of the previous rounds:\n${historyText}` : ''}
-
-Claude's latest perspective:
-${claudeInput}
-
-Based on Claude's perspective${history.length > 0 ? ' and the previous discussion' : ''}, please:
-1. Identify areas where you agree with Claude
-2. Note any valuable insights from Claude that you hadn't considered
-3. Respectfully point out any potential issues with Claude's approach
-4. Build upon both your ideas to refine the approach
-5. Suggest concrete next steps or details to consider
-
-Remember, this is a collaborative process to develop the best possible solution.
-`;
-
-          const geminiResponse = await generateWithGeminiPro(collaborationPrompt);
-          
-          return {
-            content: [{ 
-              type: "text", 
-              text: geminiResponse 
-            }]
-          };
+        const geminiFirstResponse = await generateWithGeminiPro(firstRoundPrompt);
+        
+        // Extract consensus score 
+        const consensusMatch = geminiFirstResponse.match(/Consensus Score:\s*(\d+)/i);
+        const consensusScore = consensusMatch ? parseInt(consensusMatch[1], 10) : 0;
+        
+        // Record first round
+        rounds.push({
+          number: currentRound,
+          claudeThoughts: claudeThoughts,
+          geminiResponse: geminiFirstResponse,
+          consensusScore: consensusScore
+        });
+        
+        // Check if we already have consensus
+        if (consensusScore >= 8) {
+          logger.info(`Consensus reached in first round with score ${consensusScore}`);
+          consensusReached = true;
         }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error(`Error in brainstorming: ${errorMessage}`);
         
-        return {
-          content: [{ 
-            type: "text", 
-            text: `Error: ${errorMessage}` 
-          }],
-          isError: true
-        };
-      }
-    }
-  );
-  
-  // Final synthesis tool after brainstorming
-  server.tool(
-    "gemini-brainstorm-synthesis",
-    {
-      prompt: z.string().describe("The original problem statement or query"),
-      history: z.array(z.object({
-        round: z.number(),
-        claudeInput: z.string(),
-        geminiResponse: z.string(),
-      })).describe("The complete history of brainstorming rounds")
-    },
-    async ({ prompt, history }) => {
-      console.log(`Creating brainstorm synthesis with Gemini`);
-      
-      try {
-        const historyText = history.map(entry => `
-Round ${entry.round}:
-- Claude: ${entry.claudeInput.substring(0, 500)}...
-- Gemini: ${entry.geminiResponse.substring(0, 500)}...
-`).join("\n");
-
-        const synthesisPrompt = `
-You've participated in a collaborative brainstorming session with Claude about this request:
+        // Continue with additional rounds if needed
+        currentRound++;
+        let lastClaudeThoughts = claudeThoughts;
+        let lastGeminiResponse = geminiFirstResponse;
+        
+        while (currentRound <= maxRounds && !consensusReached) {
+          // Generate Claude's response to Gemini (using Gemini to simulate)
+          const simulateClaudePrompt = `
+You will simulate Claude's response in our brainstorming process about this request:
 
 ---
 ${prompt}
 ---
 
-Here's the complete conversation history:
-${historyText}
+Previous exchange:
+1. Claude's initial thoughts: 
+${lastClaudeThoughts.substring(0, 300)}${lastClaudeThoughts.length > 300 ? '...' : ''}
 
-Based on this collaborative discussion, please provide:
-1. A comprehensive synthesis of the best ideas from both assistants
-2. A clear, step-by-step plan to address the user's request
-3. Required resources, tools, or information needed
-4. Any potential challenges and how to address them
-5. A conclusion summarizing the unified approach
+2. Your (Gemini's) response: 
+${lastGeminiResponse}
 
-Present this as a unified final plan that represents the best collaborative thinking of both assistants.
+As Claude, respond to Gemini's message. Use Claude's communication style:
+1. Analytical, thoughtful, and balanced
+2. Precise and well-structured
+3. Careful about implementation details
+4. Focused on understanding nuance
+
+Include areas of agreement, further refinements, and a path forward.
+
+End your response with a "Consensus Score" from 1-10:
+- 1-3: Significant differences remain
+- 4-6: Closer alignment but key differences exist
+- 7-9: Strong alignment with minor refinements
+- 10: Complete consensus
+
+Format: "Consensus Score: [NUMBER]"
 `;
 
-        const geminiResponse = await generateWithGeminiPro(synthesisPrompt);
+          const simulatedClaudeResponse = await generateWithGeminiPro(simulateClaudePrompt);
+          
+          // Extract consensus score
+          const claudeConsensusMatch = simulatedClaudeResponse.match(/Consensus Score:\s*(\d+)/i);
+          const claudeConsensusScore = claudeConsensusMatch ? parseInt(claudeConsensusMatch[1], 10) : 0;
+          
+          // Generate Gemini's response to Claude
+          const geminiFollowUpPrompt = `
+Continuing our collaboration with Claude on this request:
+
+---
+${prompt}
+---
+
+Latest exchange:
+1. Your previous response: 
+${lastGeminiResponse.substring(0, 300)}${lastGeminiResponse.length > 300 ? '...' : ''}
+
+2. Claude's latest thoughts: 
+${simulatedClaudeResponse}
+
+Respond to Claude's latest message, focusing on:
+1. Addressing any remaining differences
+2. Building on areas of agreement
+3. Moving toward a final consensus solution
+4. Clarifying implementation details
+
+End your response with a "Consensus Score" from 1-10:
+- 1-3: Significant differences remain
+- 4-6: Closer alignment but key differences exist
+- 7-9: Strong alignment with minor refinements
+- 10: Complete consensus
+
+Format: "Consensus Score: [NUMBER]"
+`;
+
+          const geminiResponse = await generateWithGeminiPro(geminiFollowUpPrompt);
+          
+          // Extract consensus score
+          const geminiConsensusMatch = geminiResponse.match(/Consensus Score:\s*(\d+)/i);
+          const geminiConsensusScore = geminiConsensusMatch ? parseInt(geminiConsensusMatch[1], 10) : 0;
+          
+          // Record this round
+          rounds.push({
+            number: currentRound,
+            claudeThoughts: simulatedClaudeResponse,
+            geminiResponse: geminiResponse,
+            consensusScore: geminiConsensusScore
+          });
+          
+          // Check if we've reached consensus
+          if (geminiConsensusScore >= 8 || claudeConsensusScore >= 8) {
+            logger.info(`Consensus reached in round ${currentRound} with score ${geminiConsensusScore}`);
+            consensusReached = true;
+          }
+          
+          // Update for next round
+          lastClaudeThoughts = simulatedClaudeResponse;
+          lastGeminiResponse = geminiResponse;
+          currentRound++;
+        }
         
+        // Generate final synthesis of the conversation
+        const synthesisPrompt = `
+You've completed a collaborative brainstorming session with Claude about:
+
+---
+${prompt}
+---
+
+Here's the conversation history:
+${rounds.map(round => `
+Round ${round.number}:
+- Claude: ${round.claudeThoughts.substring(0, 250)}${round.claudeThoughts.length > 250 ? '...' : ''}
+- Gemini: ${round.geminiResponse.substring(0, 250)}${round.geminiResponse.length > 250 ? '...' : ''}
+- Consensus Score: ${round.consensusScore}/10
+`).join('\n')}
+
+Create a comprehensive synthesis that Claude can implement:
+1. A clear summary of the approach both AIs agreed upon
+2. A specific, actionable plan addressing the user's request
+3. Key implementation details and considerations
+4. Any technical requirements or resources needed
+5. Next steps for Claude to execute
+
+Your synthesis should be structured, thorough, and ready for Claude to implement.
+`;
+
+        const finalSynthesis = await generateWithGeminiPro(synthesisPrompt);
+        
+        // Format the conversation history
+        const conversationHistory = rounds.map(round => `
+## Round ${round.number}
+
+### Claude's Thoughts
+${round.claudeThoughts}
+
+### Gemini's Response
+${round.geminiResponse}
+
+**Consensus Score: ${round.consensusScore}/10**
+`).join('\n\n---\n\n');
+        
+        // Return the final result
         return {
           content: [{ 
             type: "text", 
-            text: geminiResponse 
+            text: `# Collaborative Solution: ${prompt.substring(0, 50)}...
+
+## Final Synthesis
+${finalSynthesis}
+
+${consensusReached 
+  ? `\n\n*Consensus reached after ${rounds.length} rounds of collaboration.*` 
+  : `\n\n*Maximum rounds (${maxRounds}) reached. Providing best synthesis.*`}
+
+## Conversation History
+${conversationHistory}`
           }]
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error(`Error in brainstorm synthesis: ${errorMessage}`);
+        logger.error(`Error in brainstorming: ${errorMessage}`);
         
         return {
-          content: [{ 
-            type: "text", 
-            text: `Error: ${errorMessage}` 
-          }],
+          content: [{ type: "text", text: `Error: ${errorMessage}` }],
           isError: true
         };
       }
