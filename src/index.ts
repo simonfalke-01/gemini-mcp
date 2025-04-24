@@ -83,7 +83,15 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 // Get model name from environment or use default
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-pro-preview-03-25'
+// Use a safeguard to ensure we always have a valid model name
+const defaultModel = 'gemini-2.5-pro-preview-03-25'
+const geminiModel = process.env.GEMINI_MODEL || defaultModel
+
+// Log model configuration for debugging
+logger.debug(`Model configuration:
+  - GEMINI_MODEL: ${process.env.GEMINI_MODEL || '(not set, using default)'}
+  - GEMINI_PRO_MODEL: ${process.env.GEMINI_PRO_MODEL || '(not set, using default)'}
+  - GEMINI_FLASH_MODEL: ${process.env.GEMINI_FLASH_MODEL || '(not set, using default)'}`)
 
 async function main() {
   logger.info(`Starting MCP Gemini Server with model: ${geminiModel}`)
@@ -106,13 +114,19 @@ async function main() {
     registerSummarizeTool(server)
     registerImageGenTool(server)
 
-    // Start server with stdio transport with proper error handling
+    // Start server with stdio transport with improved error handling
     const transport = new StdioServerTransport()
 
     // Set up error handling for transport
     transport.onclose = () => {
       logger.warn('MCP transport connection closed')
-      // Don't exit process here, as we'll attempt to keep the server running
+      // Keep the server running but log the event
+      logger.debug('Connection closed event triggered')
+    }
+
+    transport.onerror = (error) => {
+      logger.error('MCP transport error:', error)
+      // Log error but don't exit
     }
 
     // Set up error handling for the connection
@@ -121,8 +135,8 @@ async function main() {
       logger.info('MCP Gemini Server running')
     } catch (err) {
       logger.error('Failed to connect MCP server transport:', err)
-      // Attempt to reconnect or handle gracefully
-      process.exit(1)
+      // Don't exit immediately to allow for potential recovery
+      logger.warn('Server will attempt to continue running')
     }
 
     // Handle process termination

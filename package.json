@@ -31,7 +31,7 @@
   "license": "MIT",
   "dependencies": {
     "@google/genai": "^0.10.0",
-    "@modelcontextprotocol/sdk": "^1.8.0",
+    "@modelcontextprotocol/sdk": "^1.10.2",
     "zod": "^3.22.4"
   },
   "devDependencies": {
