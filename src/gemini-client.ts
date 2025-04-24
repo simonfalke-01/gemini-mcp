@@ -4,13 +4,13 @@
  * This module initializes and manages the connection to Google's Gemini API.
  */
 
-import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai'
+import { GoogleGenAI } from '@google/genai'
 import { logger } from './utils/logger.js'
 
 // Global clients
-let genAI: GoogleGenerativeAI
-let geminiProModel: GenerativeModel
-let geminiFlashModel: GenerativeModel
+let genAI: GoogleGenAI
+let proModelName: string
+let flashModelName: string
 
 /**
  * Initialize the Gemini client with configured models
@@ -24,14 +24,13 @@ export async function initGeminiClient(): Promise<void> {
 
   try {
     // Initialize the API client
-    genAI = new GoogleGenerativeAI(apiKey)
+    genAI = new GoogleGenAI({ apiKey })
 
     // Set up models
-    const proModelName = process.env.GEMINI_PRO_MODEL || 'gemini-2.5-pro'
-    const flashModelName = process.env.GEMINI_FLASH_MODEL || 'gemini-2.5-flash'
-
-    geminiProModel = genAI.getGenerativeModel({ model: proModelName })
-    geminiFlashModel = genAI.getGenerativeModel({ model: flashModelName })
+    proModelName =
+      process.env.GEMINI_PRO_MODEL || 'gemini-2.5-pro-exp-03-25'
+    flashModelName =
+      process.env.GEMINI_FLASH_MODEL || 'gemini-2.0-flash-001'
 
     // Test connection with timeout and retry
     let connected = false
@@ -51,8 +50,10 @@ export async function initGeminiClient(): Promise<void> {
         })
 
         // Test connection
-        const connectionPromise =
-          geminiFlashModel.generateContent('Test connection')
+        const connectionPromise = genAI.models.generateContent({
+          model: proModelName,
+          contents: 'Test connection',
+        })
         const result = await Promise.race([connectionPromise, timeoutPromise])
 
         if (!result) {
@@ -91,11 +92,14 @@ export async function generateWithGeminiPro(prompt: string): Promise<string> {
   try {
     logger.prompt(prompt)
 
-    const result = await geminiProModel.generateContent(prompt)
-    const response = result.response.text()
+    const response = await genAI.models.generateContent({
+      model: proModelName,
+      contents: prompt,
+    })
 
-    logger.response(response)
-    return response
+    const responseText = response.text || ''
+    logger.response(responseText)
+    return responseText
   } catch (error) {
     logger.error('Error generating content with Gemini Pro:', error)
     throw error
@@ -109,11 +113,14 @@ export async function generateWithGeminiFlash(prompt: string): Promise<string> {
   try {
     logger.prompt(prompt)
 
-    const result = await geminiFlashModel.generateContent(prompt)
-    const response = result.response.text()
+    const response = await genAI.models.generateContent({
+      model: flashModelName,
+      contents: prompt,
+    })
 
-    logger.response(response)
-    return response
+    const responseText = response.text || ''
+    logger.response(responseText)
+    return responseText
   } catch (error) {
     logger.error('Error generating content with Gemini Flash:', error)
     throw error
@@ -128,31 +135,33 @@ export async function generateWithChat(
   useProModel = true
 ): Promise<string> {
   try {
-    const model = useProModel ? geminiProModel : geminiFlashModel
-    const chat = model.startChat()
+    const model = useProModel ? proModelName : flashModelName
+
+    // Format messages for the Gemini API
+    const formattedContents = messages.map((msg) => ({
+      role: msg.role === 'user' ? 'user' : 'model',
+      parts: [{ text: msg.content }],
+    }))
 
     logger.debug(
       'Starting chat with messages:',
       JSON.stringify(messages, null, 2)
     )
 
-    // Add all messages to the chat
-    for (const message of messages) {
-      if (message.role === 'user') {
-        logger.prompt(message.content)
-        await chat.sendMessage(message.content)
-      }
-    }
-
-    // Send the last message if it's from the user
+    // Handle the conversation based on the last message
     const lastMessage = messages[messages.length - 1]
     if (lastMessage.role === 'user') {
       logger.prompt(lastMessage.content)
-      const result = await chat.sendMessage(lastMessage.content)
-      const response = result.response.text()
 
-      logger.response(response)
-      return response
+      // Generate content with the conversation history
+      const response = await genAI.models.generateContent({
+        model: model,
+        contents: formattedContents,
+      })
+
+      const responseText = response.text || ''
+      logger.response(responseText)
+      return responseText
     } else {
       // If the last message is from the model, we don't need to send anything
       return lastMessage.content

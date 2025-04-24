@@ -83,7 +83,7 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 // Get model name from environment or use default
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-pro'
+const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-pro-preview-03-25'
 
 async function main() {
   logger.info(`Starting MCP Gemini Server with model: ${geminiModel}`)
