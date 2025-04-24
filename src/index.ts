@@ -97,6 +97,17 @@ async function main() {
   logger.info(`Starting MCP Gemini Server with model: ${geminiModel}`)
   logger.info(`Logging mode: ${logLevel}`)
 
+  // Handle unexpected stdio errors
+  process.stdin.on('error', (err) => {
+    logger.error('STDIN error:', err)
+    // Don't exit, just log
+  })
+  
+  process.stdout.on('error', (err) => {
+    logger.error('STDOUT error:', err)
+    // Don't exit, just log
+  })
+
   try {
     // Initialize Gemini client
     await initGeminiClient()
@@ -114,29 +125,86 @@ async function main() {
     registerSummarizeTool(server)
     registerImageGenTool(server)
 
-    // Start server with stdio transport with improved error handling
+    // Start server with stdio transport with enhanced error handling
     const transport = new StdioServerTransport()
 
-    // Set up error handling for transport
+    // Set up error handling for transport with improved error recovery
     transport.onclose = () => {
       logger.warn('MCP transport connection closed')
-      // Keep the server running but log the event
       logger.debug('Connection closed event triggered')
+      
+      // Attempt to recover connection after brief delay with backoff strategy
+      let reconnectAttempts = 0;
+      const maxReconnectAttempts = 5;
+      
+      const attemptReconnect = () => {
+        if (reconnectAttempts >= maxReconnectAttempts) {
+          logger.error(`Failed to reconnect after ${maxReconnectAttempts} attempts`);
+          return;
+        }
+        
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts - 1), 10000);
+        
+        logger.info(`Attempting to reconnect (${reconnectAttempts}/${maxReconnectAttempts}) after ${delay}ms...`);
+        
+        setTimeout(() => {
+          try {
+            // Check if stdin/stdout are still available
+            if (process.stdin.destroyed || process.stdout.destroyed) {
+              logger.error('Cannot reconnect: stdin or stdout is destroyed');
+              return;
+            }
+            
+            server.connect(transport)
+              .then(() => {
+                logger.info('Successfully reconnected to MCP transport');
+                reconnectAttempts = 0;
+              })
+              .catch(e => {
+                logger.error('Reconnection failed:', e);
+                attemptReconnect(); // Try again with backoff
+              });
+          } catch (e) {
+            logger.error('Error during reconnection attempt:', e);
+            attemptReconnect(); // Try again with backoff
+          }
+        }, delay);
+      };
+      
+      attemptReconnect();
     }
 
     transport.onerror = (error) => {
       logger.error('MCP transport error:', error)
-      // Log error but don't exit
+      // Log detailed error information for debugging
+      if (error instanceof Error) {
+        logger.debug(`Error name: ${error.name}, message: ${error.message}`)
+        logger.debug(`Stack trace: ${error.stack}`)
+      }
     }
 
-    // Set up error handling for the connection
+    // Set up error handling for the connection with more diagnostics
     try {
+      // Log environment diagnostic info before connecting
+      logger.debug(`Process details - PID: ${process.pid}, Node version: ${process.version}`)
+      logger.debug(`Environment variables: API_KEY=${process.env.GEMINI_API_KEY ? 'SET' : 'NOT_SET'}, VERBOSE=${process.env.VERBOSE || 'not set'}`)
+      logger.debug(`Process stdin/stdout state - isTTY: ${process.stdin.isTTY}, ${process.stdout.isTTY}`)
+      
       await server.connect(transport)
       logger.info('MCP Gemini Server running')
     } catch (err) {
       logger.error('Failed to connect MCP server transport:', err)
-      // Don't exit immediately to allow for potential recovery
-      logger.warn('Server will attempt to continue running')
+      
+      // More detailed error logging
+      if (err instanceof Error) {
+        logger.debug(`Error stack: ${err.stack}`)
+        logger.debug(`Error details: name=${err.name}, message=${err.message}`)
+      } else {
+        logger.debug(`Non-Error object thrown: ${JSON.stringify(err)}`)
+      }
+      
+      logger.warn('Server will attempt to continue running despite connection error')
     }
 
     // Handle process termination
