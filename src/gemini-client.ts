@@ -33,15 +33,45 @@ export async function initGeminiClient(): Promise<void> {
     geminiProModel = genAI.getGenerativeModel({ model: proModelName });
     geminiFlashModel = genAI.getGenerativeModel({ model: flashModelName });
     
-    // Test connection
-    const result = await geminiFlashModel.generateContent("Test connection");
-    if (!result) {
-      throw new Error("Failed to connect to Gemini API");
-    }
+    // Test connection with timeout and retry
+    let connected = false;
+    let attempts = 0;
+    const maxAttempts = 3;
     
-    logger.info(`Successfully connected to Gemini API`);
-    logger.info(`Pro model: ${proModelName}`);
-    logger.info(`Flash model: ${flashModelName}`);
+    while (!connected && attempts < maxAttempts) {
+      try {
+        attempts++;
+        logger.info(`Connecting to Gemini API (attempt ${attempts}/${maxAttempts})...`);
+        
+        // Set up a timeout for the connection test
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("Connection timeout")), 10000);
+        });
+        
+        // Test connection
+        const connectionPromise = geminiFlashModel.generateContent("Test connection");
+        const result = await Promise.race([connectionPromise, timeoutPromise]);
+        
+        if (!result) {
+          throw new Error("Failed to connect to Gemini API: empty response");
+        }
+        
+        connected = true;
+        logger.info(`Successfully connected to Gemini API`);
+        logger.info(`Pro model: ${proModelName}`);
+        logger.info(`Flash model: ${flashModelName}`);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.warn(`Connection attempt ${attempts} failed: ${errorMessage}`);
+        
+        if (attempts >= maxAttempts) {
+          throw new Error(`Failed to connect to Gemini API after ${maxAttempts} attempts: ${errorMessage}`);
+        }
+        
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
   } catch (error) {
     logger.error("Failed to initialize Gemini client:", error);
     throw error;

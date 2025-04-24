@@ -27,6 +27,17 @@ export function registerQueryTool(server: McpServer): void {
           ? await generateWithGeminiPro(prompt)
           : await generateWithGeminiFlash(prompt);
         
+        // Check for empty response to avoid potential MCP errors
+        if (!response || response.trim() === "") {
+          return {
+            content: [{ 
+              type: "text", 
+              text: "Error: Received empty response from Gemini API" 
+            }],
+            isError: true
+          };
+        }
+        
         return {
           content: [{ 
             type: "text", 

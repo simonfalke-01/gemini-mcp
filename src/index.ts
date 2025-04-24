@@ -106,11 +106,24 @@ async function main() {
     registerSummarizeTool(server);
     registerImageGenTool(server);
 
-    // Start server with stdio transport
+    // Start server with stdio transport with proper error handling
     const transport = new StdioServerTransport();
-    await server.connect(transport);
-
-    logger.info("MCP Gemini Server running");
+    
+    // Set up error handling for transport
+    transport.onclose = () => {
+      logger.warn("MCP transport connection closed");
+      // Don't exit process here, as we'll attempt to keep the server running
+    };
+    
+    // Set up error handling for the connection
+    try {
+      await server.connect(transport);
+      logger.info("MCP Gemini Server running");
+    } catch (err) {
+      logger.error("Failed to connect MCP server transport:", err);
+      // Attempt to reconnect or handle gracefully
+      process.exit(1);
+    }
 
     // Handle process termination
     process.on("SIGINT", async () => {
